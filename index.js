@@ -48,7 +48,7 @@ app.listen(port, () => {
    HMAC VERIFICATION — uses API SECRET KEY
 ───────────────────────────────────────────── */
 function verifyShopifyHmac(rawBody, hmacHeader) {
-  const secret = process.env.SHOPIFY_API_SECRET_KEY;
+  const secret = "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";
 
   const digest = crypto
     .createHmac("sha256", secret)
