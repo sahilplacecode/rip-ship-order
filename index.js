@@ -1,54 +1,15 @@
 // index.js
 import express from "express";
 import crypto from "crypto";
-import getRawBody from "raw-body";
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 /* ─────────────────────────────────────────────
-   WEBHOOK ROUTE — receives Shopify order.create
-───────────────────────────────────────────── */
-app.post("/webhooks/orders/create", async (req, res) => {
-  try {
-    const rawBody = await getRawBody(req);
-    const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-
-    // 1️⃣ Verify webhook
-    if (!verifyShopifyHmac(rawBody, hmacHeader)) {
-      console.error("❌ Invalid Shopify HMAC — webhook rejected");
-      return res.status(401).send("Invalid webhook");
-    }
-
-    console.log("✅ Shopify Webhook Verified");
-
-    // 2️⃣ Parse order JSON
-    const order = JSON.parse(rawBody.toString("utf8"));
-    console.log("📦 Received order:", order.id);
-
-    // 3️⃣ Run your Rip & Ship logic
-    await handleRipShipLogic(order);
-
-    res.status(200).send("OK");
-  } catch (err) {
-    console.error("💥 Webhook error:", err);
-    res.status(500).send("Server error");
-  }
-});
-
-app.get("/", (req, res) => {
-  res.send("Rip & Ship webhook running.");
-});
-
-app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
-});
-
-/* ─────────────────────────────────────────────
    HMAC VERIFICATION — uses API SECRET KEY
 ───────────────────────────────────────────── */
 function verifyShopifyHmac(rawBody, hmacHeader) {
-  const secret = "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";
+  const secret = "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"; // <-- YOUR SECRET
 
   const digest = crypto
     .createHmac("sha256", secret)
@@ -60,6 +21,51 @@ function verifyShopifyHmac(rawBody, hmacHeader) {
     Buffer.from(hmacHeader)
   );
 }
+
+/* ─────────────────────────────────────────────
+   SHOPIFY WEBHOOK ENDPOINT (RAW BODY REQUIRED)
+───────────────────────────────────────────── */
+app.post(
+  "/webhooks/orders/create",
+  express.raw({ type: "*/*" }), // <-- CRITICAL FIX
+  async (req, res) => {
+    try {
+      const rawBody = req.body; // exact raw bytes
+      const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+
+      // 1️⃣ Verify HMAC
+      if (!verifyShopifyHmac(rawBody, hmacHeader)) {
+        console.error("❌ Invalid Shopify HMAC — webhook rejected");
+        return res.status(401).send("Invalid webhook");
+      }
+
+      console.log("✅ Shopify Webhook Verified");
+
+      // 2️⃣ Parse order JSON
+      const order = JSON.parse(rawBody.toString("utf8"));
+      console.log("📦 Received order:", order.id);
+
+      // 3️⃣ Run your Rip & Ship logic
+      await handleRipShipLogic(order);
+
+      res.status(200).send("OK");
+    } catch (err) {
+      console.error("💥 Webhook error:", err);
+      res.status(500).send("Server error");
+    }
+  }
+);
+
+/* ─────────────────────────────────────────────
+   HOME ROUTE
+───────────────────────────────────────────── */
+app.get("/", (req, res) => {
+  res.send("Rip & Ship webhook running.");
+});
+
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
+});
 
 /* ─────────────────────────────────────────────
    CORE RIP & SHIP LOGIC
@@ -81,23 +87,23 @@ async function handleRipShipLogic(order) {
 
     // 1️⃣ Read metafield rip.master_sku
     const masterSku = await getMasterSku(productId);
-    if (!masterSku) continue; // skip non-rip products
+    if (!masterSku) continue;
 
     console.log(`🔍 Rip & Ship detected → master SKU = ${masterSku}`);
     isRipShipOrder = true;
 
-    // 2️⃣ Get inventory_item_id of the RIP variant
+    // 2️⃣ RIP variant inventory item
     const ripVariant = await getVariantById(variantId);
     const ripInvId = ripVariant.inventory_item_id;
 
-    // 3️⃣ Find master variant by SKU → get its inventory_item_id
+    // 3️⃣ Master variant inventory item
     const masterVariant = await getVariantBySku(masterSku);
     const masterInvId = masterVariant.inventory_item_id;
 
-    // 4️⃣ Restore quantity to RIP product (undo Shopify deduction)
+    // 4️⃣ Restore RIP inventory
     await adjustInventory(ripInvId, locationId, quantity);
 
-    // 5️⃣ Deduct from master product, but never below zero
+    // 5️⃣ Deduct from master inventory
     const masterAvailable = await getAvailable(masterInvId, locationId);
     const subtractQty = Math.min(quantity, masterAvailable);
 
@@ -109,7 +115,7 @@ async function handleRipShipLogic(order) {
     }
   }
 
-  // 6️⃣ Add "RIP & SHIP" tag
+  // 6️⃣ Tag order
   if (isRipShipOrder) {
     await tagOrder(order.id, "RIP & SHIP");
     console.log("🏷 Order tagged as RIP & SHIP");
@@ -117,7 +123,7 @@ async function handleRipShipLogic(order) {
 }
 
 /* ─────────────────────────────────────────────
-   SHOPIFY REST HELPERS
+   SHOPIFY API HELPERS — REST
 ───────────────────────────────────────────── */
 async function shopify(path, method = "GET", body = null) {
   const res = await fetch(
@@ -146,7 +152,6 @@ async function getMasterSku(productId) {
   const data = await shopify(
     `/products/${productId}/metafields.json?namespace=rip&key=master_sku`
   );
-
   return data.metafields?.[0]?.value || null;
 }
 
@@ -164,7 +169,6 @@ async function getAvailable(invId, locId) {
   const data = await shopify(
     `/inventory_levels.json?inventory_item_ids=${invId}&location_ids=${locId}`
   );
-
   return data.inventory_levels?.[0]?.available || 0;
 }
 
@@ -174,7 +178,6 @@ async function adjustInventory(invId, locId, amount) {
     location_id: Number(locId),
     available_adjustment: amount
   });
-
   console.log(`🔧 Adjusted inventory_item_id ${invId} by ${amount}`);
 }
 
